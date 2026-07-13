@@ -10,6 +10,7 @@ Contract summary:
 """
 import json
 from llm import call_json
+from retrieval import retrieve_for_segment, format_context
 
 
 # ---------------------------------------------------------------------------
@@ -38,10 +39,26 @@ def planner(knowledge_state, segment):
 # ---------------------------------------------------------------------------
 # TEACHER
 # ---------------------------------------------------------------------------
-def teacher(segment, task):
+def teacher(segment, task, use_rag=True):
     """task = 'teach'  -> returns {'teaching_text': ...}
        task = 'worked_example' -> returns {'example_text': ...}
+
+    use_rag: if True (default), ground the response in lecture chunks
+    retrieved for this segment's dimension. If False, fall back to the
+    LLM's own generic knowledge -- kept as a switch for before/after
+    comparison of retrieval-grounded vs. ungrounded teaching.
     """
+    context_block = ""
+    if use_rag:
+        chunks = retrieve_for_segment(segment)
+        context_block = format_context(chunks)
+
+    rag_instruction = (
+        " Teach this segment using the instructor's actual lecture material "
+        "below. Use the instructor's own examples, analogies, and phrasing "
+        "where they exist -- do not substitute generic textbook explanations."
+    )
+
     if task == "teach":
         system = (
             "You are the Teacher agent. Teach ONE lecture segment clearly and "
@@ -49,10 +66,14 @@ def teacher(segment, task):
             "given key points in plain language with at most one short example. "
             "Do not quiz the student. Return ONLY JSON with key \"teaching_text\"."
         )
+        if context_block:
+            system += rag_instruction
         user = (
             f"Concept: {segment['concept']}\n"
             f"Key points to cover:\n- " + "\n- ".join(segment["key_points"])
         )
+        if context_block:
+            user += f"\n\nInstructor's lecture material:\n{context_block}"
         return call_json(system, user, max_tokens=600)
 
     if task == "worked_example":
@@ -62,10 +83,14 @@ def teacher(segment, task):
             "concept click. Do not re-teach everything; just illustrate. "
             "Return ONLY JSON with key \"example_text\"."
         )
+        if context_block:
+            system += rag_instruction
         user = (
             f"Concept: {segment['concept']}\n"
             f"Key points:\n- " + "\n- ".join(segment["key_points"])
         )
+        if context_block:
+            user += f"\n\nInstructor's lecture material:\n{context_block}"
         return call_json(system, user, max_tokens=400)
 
     raise ValueError(f"Unknown teacher task: {task}")
