@@ -1,42 +1,63 @@
 """
-Thin wrapper around the Google Gemini API that returns parsed JSON.
-
-This is a DROP-IN replacement for the Anthropic version: it exposes the same
-call_json(system, user) function, so agents.py and orchestrator.py need no
-changes at all.
+Thin wrapper that returns parsed JSON from either Google Gemini or OpenAI.
+Both provider functions expose the same call_json(system, user, max_tokens)
+signature, so agents.py and orchestrator.py need no changes regardless of
+which provider is active.
 
 Setup:
-    pip install google-genai
-    set GEMINI_API_KEY   (Windows)   /   export GEMINI_API_KEY  (Mac/Linux)
+    OpenAI (default):
+        pip install openai
+        set OPENAI_API_KEY
+
+    Gemini:
+        pip install google-genai
+        set GEMINI_API_KEY
+        set LLM_PROVIDER=gemini
 """
 import json
 import os
 import re
 import time
-from google import genai
-from google.genai import types
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+PROVIDER = os.environ.get("LLM_PROVIDER", "openai").lower()
 
-# Free-tier model. "gemini-2.5-flash" is no longer available to new API keys
-# (Google returns a 404). "gemini-flash-latest" works but its free daily quota
-# (20 req/day at time of writing) is easy to exhaust; "gemini-flash-lite-latest"
-# is a separate quota bucket with a much higher free-tier allowance.
-MODEL = "gemini-flash-lite-latest"
+# Gemini: "gemini-2.5-flash" is no longer available to new API keys (404).
+# "gemini-flash-latest" works but its free daily quota (20 req/day at time
+# of writing) is easy to exhaust; "gemini-flash-lite-latest" is a separate
+# quota bucket with a much higher free-tier allowance.
+GEMINI_MODEL = "gemini-flash-lite-latest"
+
+OPENAI_MODEL = "gpt-5.4-mini"
+
+_gemini_client = None
+_openai_client = None
 
 
-def call_json(system, user, max_tokens=1000):
-    """Call Gemini and parse its response as JSON.
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+        _gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _gemini_client
 
-    Each agent is instructed (via its system prompt) to return ONLY JSON.
-    We strip any accidental markdown fences before parsing, and retry once
-    on a rate-limit (429) error with a short backoff.
-    """
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
+
+
+def _call_gemini(system, user, max_tokens):
+    from google.genai import types
+
+    client = _get_gemini_client()
     last_error = None
     for attempt in range(6):
         try:
             resp = client.models.generate_content(
-                model=MODEL,
+                model=GEMINI_MODEL,
                 contents=user,
                 config=types.GenerateContentConfig(
                     system_instruction=system,
@@ -71,3 +92,55 @@ def call_json(system, user, max_tokens=1000):
             raise
 
     raise RuntimeError(f"Failed after 6 attempts (rate limits?): {last_error}")
+
+
+def _call_openai(system, user, max_tokens):
+    client = _get_openai_client()
+    last_error = None
+    for attempt in range(6):
+        try:
+            resp = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                # GPT-5-series models use max_completion_tokens, not
+                # max_tokens, and reasoning tokens are drawn from that same
+                # budget -- reasoning_effort="none" keeps hidden reasoning
+                # from eating the whole budget before any JSON is emitted
+                # (the same failure mode we hit with Gemini's thinking mode).
+                max_completion_tokens=max_tokens,
+                reasoning_effort="none",
+                response_format={"type": "json_object"},
+            )
+            text = resp.choices[0].message.content
+            text = re.sub(r"```json|```", "", text).strip()
+            return json.loads(text)
+
+        except json.JSONDecodeError:
+            raise ValueError(f"Agent did not return valid JSON:\n{text}")
+
+        except Exception as e:
+            if "429" in str(e) or "rate_limit" in str(e).lower():
+                last_error = e
+                wait = 2 ** attempt
+                print(f"  [rate limit hit, waiting {wait}s...]")
+                time.sleep(wait)
+                continue
+            raise
+
+    raise RuntimeError(f"Failed after 6 attempts (rate limits?): {last_error}")
+
+
+def call_json(system, user, max_tokens=1000):
+    """Call the active provider (LLM_PROVIDER env var, default "gemini")
+    and parse its response as JSON.
+
+    Each agent is instructed (via its system prompt) to return ONLY JSON.
+    We strip any accidental markdown fences before parsing, and retry on
+    rate-limit errors with backoff.
+    """
+    if PROVIDER == "openai":
+        return _call_openai(system, user, max_tokens)
+    return _call_gemini(system, user, max_tokens)
