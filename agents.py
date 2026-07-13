@@ -127,7 +127,9 @@ def student(question, context, persona, topic_mastery):
 # ---------------------------------------------------------------------------
 def assessor(task, **kw):
     """task = 'evaluate_gate' -> {'branch': 'strong_yes'|'unsure'}
-       task = 'score'         -> {'correct': bool, 'score': 0-1, 'reasoning': str}
+       task = 'score'         -> {'correct': bool, 'score': 0-1,
+                                   'confidence': 'confident'|'hedged'|'guessing',
+                                   'reasoning': str}
     """
     if task == "evaluate_gate":
         system = (
@@ -147,7 +149,20 @@ def assessor(task, **kw):
         system = (
             "You are the Assessor agent. Grade the student's answer against the "
             "expected answer. Be strict but fair: partial credit is allowed. "
-            "Return ONLY JSON with keys: \"correct\" (bool), \"score\" (0-1 float), "
+            "Grading must account for confidence, not just correctness -- an "
+            "uncertain-but-lucky answer is not the same as understanding. First "
+            "classify the student's confidence from their wording: "
+            "\"confident\" (states the answer directly, no hedging), "
+            "\"hedged\" (gets to a correct answer but hedges along the way, e.g. "
+            "'I think it's...', 'but I'm not sure', asks whether it's right), or "
+            "\"guessing\" (explicitly says they don't know or are just guessing). "
+            "Then apply this scoring rule: a correct answer given with \"hedged\" "
+            "confidence scores no higher than 0.6, no matter how correct the final "
+            "answer is. A correct answer given with \"confident\" confidence scores "
+            "0.8-1.0. An incorrect answer scores low regardless of confidence "
+            "(confidently wrong is not better than hedged-and-wrong). Return ONLY "
+            "JSON with keys: \"correct\" (bool), \"score\" (0-1 float), "
+            "\"confidence\" (one of \"confident\", \"hedged\", \"guessing\"), "
             "\"reasoning\" (one sentence)."
         )
         user = (
