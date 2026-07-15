@@ -151,13 +151,13 @@ def _confirm_and_update(segment, teaching, persona, mastery, knowledge_state, di
 
 
 if __name__ == "__main__":
-    # ---- Persona: already solid on distance metrics, shaky on feature scaling ----
-    # Flip "distance_metrics" to ~0.2 to watch the prerequisite-gap branch fire.
+    # ---- Persona: confident, solid grasp of feature scaling ----
+    # Flip "feature_scaling" to ~0.3 to watch the unsure/remediation path fire.
     persona = {
         "name": "Student B - strong math, new to ML",
         "mastery": {
             "distance_metrics": 0.8,
-            "feature_scaling": 0.3,   # weak on the concept itself
+            "feature_scaling": 0.9,   # should sail through the gate confidently
         },
     }
     prereq_scores = {

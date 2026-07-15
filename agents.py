@@ -104,14 +104,38 @@ def student(question, context, persona, topic_mastery):
     Low mastery should genuinely surface as confusion or wrong answers.
     Returns {'answer': ..., 'self_reported_understanding': 'yes'|'not_sure'|'no'}.
     """
+    if topic_mastery >= 0.7:
+        confidence_instruction = (
+            "Your grasp of this topic is HIGH. Answer correctly, directly, and "
+            "confidently -- no hedging phrases like 'I think', 'maybe', or "
+            "'not totally sure'. Because you genuinely understand this, "
+            "self_reported_understanding MUST be \"yes\"."
+        )
+    elif topic_mastery <= 0.4:
+        confidence_instruction = (
+            "Your grasp of this topic is LOW. Be genuinely confused or make "
+            "the kind of mistake a struggling student makes -- do NOT answer "
+            "correctly just because you can. self_reported_understanding "
+            "should be \"not_sure\" or \"no\", matching your actual confusion."
+        )
+    else:
+        confidence_instruction = (
+            "Your grasp of this topic is PARTIAL. Answer with the mix of "
+            "insight and gaps a middling student would have. Let "
+            "self_reported_understanding land naturally on \"yes\", "
+            "\"not_sure\", or \"no\" depending on how sure your own answer "
+            "actually made you feel."
+        )
+
     system = (
         "You are simulating a real student in a machine learning course. "
         f"Persona: {persona['name']}. "
         f"Your current grasp of THIS topic is {topic_mastery:.2f} on a 0-1 scale "
-        "(0 = no idea, 1 = solid). Answer authentically at that level: if your "
-        "grasp is low, be genuinely confused or make the kind of mistake a "
-        "struggling student makes -- do NOT answer correctly just because you can. "
-        "If your grasp is high, answer correctly and confidently. "
+        f"(0 = no idea, 1 = solid). {confidence_instruction} "
+        "self_reported_understanding must track your ACTUAL grasp of the "
+        "material, not a reflexive hedging habit -- do not say \"not_sure\" "
+        "just to sound humble or cautious if you actually got it right and "
+        "understand why. "
         "Return ONLY JSON with keys: \"answer\" (your response to the question) and "
         "\"self_reported_understanding\" (one of \"yes\", \"not_sure\", \"no\")."
     )
