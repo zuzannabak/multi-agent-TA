@@ -94,6 +94,31 @@ SEGMENTS = {
         ],
     },
 
+    "feature_scaling": {
+        "dimension": "feature_scaling",
+        "concept": "Why unscaled features distort KNN's distance calculations, and how min-max scaling or standardization fixes it.",
+        "key_points": [
+            "Distance-based methods like KNN are sensitive to each feature's numeric scale.",
+            "A feature with a much larger range dominates the distance calculation, regardless of how important it actually is.",
+            "Example: CPU size in mm (~1e-3) vs. processor speed in GHz (~1e9) -- speed alone would decide 'nearness'.",
+            "Min-max scaling maps a feature to [0,1]: x' = (x - min(x)) / (max(x) - min(x)).",
+            "Standardization maps a feature to mean 0, std 1: x' = (x - mean(x)) / std(x).",
+            "The goal is to give every feature an equal chance to influence distance, not let scale alone decide importance.",
+        ],
+        "gate_question": "Do you understand why unscaled features can distort KNN's distance calculations, and how feature scaling fixes it?",
+        "confirmation": {
+            "question": "A feature x1 ranges from min=2 to max=10 across the dataset. Using min-max scaling, what is the scaled value of x1=8?",
+            "expected": "0.75  ((8-2)/(10-2) = 6/8 = 0.75)",
+        },
+        "prerequisite_diagnostics": [
+            {
+                "dimension": "distance_metrics",
+                "question": "Why would a feature measured in GHz (values near 10^9) dominate a Euclidean distance calculation compared to a feature measured in millimeters (values near 10^-3)?",
+                "expected": "Euclidean distance sums squared differences across features; a feature with a much larger numeric scale produces much larger differences, so it dominates the total distance regardless of the other feature's actual importance.",
+            },
+        ],
+    },
+
     # --- add point 1, 2, ... here using the same schema ---
     # "supervised_learning_setup": { ... },
 }

@@ -2,6 +2,9 @@
 Orchestrator: runs ONE segment end-to-end, implementing the interactive
 branching diagnostic:
 
+    planner -> if "remediate", address the named weak prerequisite first
+               (teach it fully if it's its own lecture segment, otherwise
+               a single diagnostic check), THEN continue below
     teach -> gate question
         strong_yes -> confirmation question -> score -> update
         unsure     -> worked example -> re-ask gate
@@ -35,6 +38,15 @@ def run_segment(segment, knowledge_state, persona):
     # --- Planner decides ---
     plan = planner(knowledge_state, segment)
     log("PLANNER", f"{plan['action']} -> {plan['target_dimension']}: {plan['rationale']}")
+
+    # --- Planner steers: act on "remediate" instead of just logging it ---
+    target = plan.get("target_dimension")
+    if plan["action"] == "remediate" and target in knowledge_state and target != dim:
+        knowledge_state = _remediate(target, segment, knowledge_state, persona)
+    elif plan["action"] == "remediate":
+        log("ORCHESTRATOR",
+            f"Planner said remediate, but target '{target}' isn't a usable "
+            f"prerequisite (same as segment or unrecognized); teaching {dim} directly.")
 
     # --- Teacher teaches ---
     teaching = teacher(segment, "teach")["teaching_text"]
@@ -77,7 +89,7 @@ def run_segment(segment, knowledge_state, persona):
         log(f"STUDENT (prereq: {pdim})", f"{pa['answer']}")
         scored = assessor("score", question=diag["question"],
                           expected=diag["expected"], student_answer=pa)
-        log("ASSESSOR", f"prereq {pdim}: score={scored['score']} ({scored['reasoning']})")
+        log("ASSESSOR", f"prereq {pdim}: score={scored['score']} confidence={scored['confidence']} ({scored['reasoning']})")
         if scored["score"] < 0.5:
             prereq_gap = True
             log("ASSESSOR", f"GAP FOUND upstream in '{pdim}'. Remediation pointer: "
@@ -92,6 +104,39 @@ def run_segment(segment, knowledge_state, persona):
     return knowledge_state
 
 
+def _remediate(target_dim, segment, knowledge_state, persona):
+    """The planner flagged `target_dim` as a weak prerequisite for `segment`.
+    Address it before teaching the segment itself, instead of just logging
+    the planner's advice and teaching through it anyway."""
+    log("ORCHESTRATOR",
+        f"Planner steering: remediating '{target_dim}' before teaching {segment['dimension']}.")
+
+    if target_dim in SEGMENTS:
+        # It's itself a lecture topic we have full teaching material for --
+        # run the normal teach/gate/confirm loop on it first.
+        return run_segment(SEGMENTS[target_dim], knowledge_state, persona)
+
+    # No lecture segment for this dimension (e.g. a pretest-only prerequisite
+    # like linear_algebra) -- fall back to this segment's own diagnostic
+    # question for it, if one exists.
+    diag = next((d for d in segment.get("prerequisite_diagnostics", [])
+                 if d["dimension"] == target_dim), None)
+    if diag is None:
+        log("ORCHESTRATOR",
+            f"No lecture segment or diagnostic available for '{target_dim}'; "
+            f"proceeding to teach {segment['dimension']} without remediation.")
+        return knowledge_state
+
+    mastery = persona["mastery"].get(target_dim, knowledge_state[target_dim]["score"])
+    pa = student(diag["question"], "", persona, mastery)
+    log(f"STUDENT (remediation: {target_dim})", pa["answer"])
+    scored = assessor("score", question=diag["question"],
+                      expected=diag["expected"], student_answer=pa)
+    log("ASSESSOR", f"remediation {target_dim}: score={scored['score']} "
+                    f"confidence={scored['confidence']} ({scored['reasoning']})")
+    return update_state(knowledge_state, target_dim, scored["score"])
+
+
 def _confirm_and_update(segment, teaching, persona, mastery, knowledge_state, dim):
     conf = segment["confirmation"]
     log("ASSESSOR (confirmation)", conf["question"])
@@ -99,20 +144,20 @@ def _confirm_and_update(segment, teaching, persona, mastery, knowledge_state, di
     log("STUDENT", sa["answer"])
     scored = assessor("score", question=conf["question"],
                       expected=conf["expected"], student_answer=sa)
-    log("ASSESSOR", f"score={scored['score']} ({scored['reasoning']})")
+    log("ASSESSOR", f"score={scored['score']} confidence={scored['confidence']} ({scored['reasoning']})")
     knowledge_state = update_state(knowledge_state, dim, scored["score"])
     log("ORCHESTRATOR", f"Updated {dim} = {scored['score']}, advancing.")
     return knowledge_state
 
 
 if __name__ == "__main__":
-    # ---- Persona: strong linear algebra, but shaky on distance metrics ----
-    # Flip "linear_algebra" to ~0.2 to watch the prerequisite-gap branch fire.
+    # ---- Persona: already solid on distance metrics, shaky on feature scaling ----
+    # Flip "distance_metrics" to ~0.2 to watch the prerequisite-gap branch fire.
     persona = {
         "name": "Student B - strong math, new to ML",
         "mastery": {
-            "linear_algebra": 0.85,
-            "distance_metrics": 0.25,   # weak on the concept itself
+            "distance_metrics": 0.8,
+            "feature_scaling": 0.3,   # weak on the concept itself
         },
     }
     prereq_scores = {
@@ -121,7 +166,7 @@ if __name__ == "__main__":
     }
 
     ks = fresh_knowledge_state(prereq_scores)
-    segment = SEGMENTS["distance_metrics"]
+    segment = SEGMENTS["feature_scaling"]
 
     print("=" * 70)
     print("RUNNING ONE SEGMENT:", segment["dimension"])
