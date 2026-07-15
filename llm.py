@@ -32,6 +32,27 @@ OPENAI_MODEL = "gpt-5.4-mini"
 _gemini_client = None
 _openai_client = None
 
+# Running token totals for the active model, for cost-comparison tooling
+# (e.g. model_comparison.py). Not used by the normal agent/orchestrator path.
+_usage_totals = {"input_tokens": 0, "output_tokens": 0}
+
+
+def reset_usage():
+    """Zero the running token counters. Call before timing a comparison run."""
+    _usage_totals["input_tokens"] = 0
+    _usage_totals["output_tokens"] = 0
+
+
+def get_usage():
+    """Return {"input_tokens": int, "output_tokens": int} accumulated since
+    the last reset_usage() call."""
+    return dict(_usage_totals)
+
+
+def _record_usage(input_tokens, output_tokens):
+    _usage_totals["input_tokens"] += input_tokens or 0
+    _usage_totals["output_tokens"] += output_tokens or 0
+
 
 def _get_gemini_client():
     global _gemini_client
@@ -71,6 +92,9 @@ def _call_gemini(system, user, max_tokens):
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
+            usage = resp.usage_metadata
+            if usage is not None:
+                _record_usage(usage.prompt_token_count, usage.candidates_token_count)
             text = resp.text
             text = re.sub(r"```json|```", "", text).strip()
             return json.loads(text)
@@ -114,6 +138,8 @@ def _call_openai(system, user, max_tokens):
                 reasoning_effort="none",
                 response_format={"type": "json_object"},
             )
+            if resp.usage is not None:
+                _record_usage(resp.usage.prompt_tokens, resp.usage.completion_tokens)
             text = resp.choices[0].message.content
             text = re.sub(r"```json|```", "", text).strip()
             return json.loads(text)
