@@ -6,7 +6,9 @@ Contract summary:
   planner  : reads knowledge_state           -> decides teach / remediate / advance
   teacher  : given a segment + task          -> generates teaching text or worked example
   student  : given content + question + mastery -> answers + self-reports understanding
-  assessor : scores answers, decides branch  -> (orchestrator applies to knowledge_state)
+  assessor : evaluates gate self-report, and makes the ADVANCE / RETEACH /
+             CHECK_PREREQUISITE / REVIEW_LATER call directly on a checked
+             answer -> (orchestrator applies target_state to knowledge_state)
 """
 import json
 from llm import call_json
@@ -16,21 +18,27 @@ from retrieval import retrieve_for_segment, format_context
 # ---------------------------------------------------------------------------
 # PLANNER
 # ---------------------------------------------------------------------------
-def planner(knowledge_state, segment):
+def planner(knowledge_state, segment, prerequisite_dims=None):
     """Decide what to do with the current segment given the student's state."""
     system = (
         "You are the Planner agent in a one-on-one AI tutoring system. "
-        "You read the student's knowledge state and decide the next action for a "
-        "lecture segment. Return ONLY JSON with keys: "
+        "You read the student's categorical knowledge state and decide the "
+        "next action for a lecture segment. Each topic's state is one of: "
+        "NOT_SEEN, IN_PROGRESS, DEMONSTRATED, NEEDS_REVIEW. Return ONLY JSON "
+        "with keys: "
         '"action" (one of "teach", "remediate", "advance"), '
         '"target_dimension" (string), "rationale" (one sentence). '
-        "Use 'teach' if the segment's dimension has taught=false. "
-        "Use 'remediate' if a prerequisite in the dependency chain is weak (score < 0.4). "
-        "Use 'advance' only if the dimension is already taught with score >= 0.7."
+        "Use 'teach' if the segment's own dimension is NOT_SEEN or IN_PROGRESS. "
+        "Use 'remediate' if one of the segment's listed prerequisites is "
+        "NEEDS_REVIEW or NOT_SEEN -- target_dimension should name that "
+        "prerequisite. "
+        "Use 'advance' only if the segment's own dimension is already "
+        "DEMONSTRATED."
     )
     user = (
         f"Segment dimension: {segment['dimension']}\n"
-        f"Concept: {segment['concept']}\n\n"
+        f"Concept: {segment['concept']}\n"
+        f"Prerequisites for this segment: {prerequisite_dims or 'none'}\n\n"
         f"Current knowledge_state:\n{json.dumps(knowledge_state, indent=2)}"
     )
     return call_json(system, user, max_tokens=300)
@@ -151,9 +159,11 @@ def student(question, context, persona, topic_mastery):
 # ---------------------------------------------------------------------------
 def assessor(task, **kw):
     """task = 'evaluate_gate' -> {'branch': 'strong_yes'|'unsure'}
-       task = 'score'         -> {'correct': bool, 'score': 0-1,
-                                   'confidence': 'confident'|'hedged'|'guessing',
-                                   'reasoning': str}
+       task = 'decide'        -> {'decision': 'ADVANCE'|'RETEACH_CURRENT'|
+                                               'CHECK_PREREQUISITE'|'REVIEW_LATER',
+                                   'evidence': str,
+                                   'misconception': str,
+                                   'target_state': 'DEMONSTRATED'|'NEEDS_REVIEW'|'IN_PROGRESS'}
     """
     if task == "evaluate_gate":
         system = (
@@ -169,27 +179,44 @@ def assessor(task, **kw):
         )
         return call_json(system, user, max_tokens=200)
 
-    if task == "score":
+    if task == "decide":
         system = (
-            "You are the Assessor agent. Grade the student's answer against the "
-            "expected answer. Be strict but fair: partial credit is allowed. "
-            "Grading must account for confidence, not just correctness -- an "
-            "uncertain-but-lucky answer is not the same as understanding. First "
-            "classify the student's confidence from their wording: "
-            "\"confident\" (states the answer directly, no hedging), "
-            "\"hedged\" (gets to a correct answer but hedges along the way, e.g. "
-            "'I think it's...', 'but I'm not sure', asks whether it's right), or "
-            "\"guessing\" (explicitly says they don't know or are just guessing). "
-            "Then apply this scoring rule: a correct answer given with \"hedged\" "
-            "confidence scores no higher than 0.6, no matter how correct the final "
-            "answer is. A correct answer given with \"confident\" confidence scores "
-            "0.8-1.0. An incorrect answer scores low regardless of confidence "
-            "(confidently wrong is not better than hedged-and-wrong). Return ONLY "
-            "JSON with keys: \"correct\" (bool), \"score\" (0-1 float), "
-            "\"confidence\" (one of \"confident\", \"hedged\", \"guessing\"), "
-            "\"reasoning\" (one sentence)."
+            "You are the Assessor agent. You make the pedagogical call about "
+            "this topic directly, in a single step -- there is no numeric score "
+            "for a separate process to threshold afterward. Grade the student's "
+            "answer against the expected answer, then decide.\n\n"
+            "First silently judge the student's confidence from their wording: "
+            "\"confident\" (states the answer directly, no hedging), \"hedged\" "
+            "(reaches a correct answer but hedges along the way, e.g. 'I think "
+            "it's...', 'but I'm not sure', asks whether it's right), or "
+            "\"guessing\" (explicitly says they don't know or are just "
+            "guessing). A correct-but-hedged or correct-but-guessing answer is "
+            "NOT evidence of mastery -- never choose ADVANCE for an answer that "
+            "only sounds lucky.\n\n"
+            "Then choose exactly one decision:\n"
+            "  ADVANCE            - correct AND confidently reasoned; the "
+            "student has demonstrated mastery of this topic.\n"
+            "  RETEACH_CURRENT    - wrong, hedged, or guessed, but the error "
+            "looks like a misunderstanding of THIS topic specifically (not an "
+            "upstream gap) -- a worked example on this topic should fix it.\n"
+            "  CHECK_PREREQUISITE - the error pattern suggests the student is "
+            "missing one of this topic's listed prerequisites, not the topic "
+            "itself.\n"
+            "  REVIEW_LATER       - weak or wrong, but doesn't cleanly point "
+            "at this topic or a specific prerequisite; flag it without "
+            "blocking progress.\n\n"
+            "Return ONLY JSON with keys: "
+            '"decision" (one of "ADVANCE", "RETEACH_CURRENT", '
+            '"CHECK_PREREQUISITE", "REVIEW_LATER"), '
+            '"evidence" (one sentence: what in the answer supports this decision), '
+            '"misconception" (short description of the observed misconception, or "" if none), '
+            '"target_state" (the new state for this topic: "DEMONSTRATED" if '
+            'ADVANCE, "NEEDS_REVIEW" if REVIEW_LATER or CHECK_PREREQUISITE, '
+            '"IN_PROGRESS" if RETEACH_CURRENT).'
         )
         user = (
+            f"Topic: {kw['dimension']}\n"
+            f"Prerequisites for this topic: {kw.get('prerequisite_dims') or 'none'}\n"
             f"Question: {kw['question']}\n"
             f"Expected answer: {kw['expected']}\n"
             f"Student answer: {kw['student_answer'].get('answer')}"
