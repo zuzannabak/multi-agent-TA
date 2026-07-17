@@ -11,13 +11,15 @@ teaches next based on where their understanding breaks down.
 
 The system runs an interactive diagnostic loop for each lecture segment:
 
-1. The **planner** reads the student's current knowledge state and decides whether
-   to teach, remediate a prerequisite, or advance.
+1. The **planner** reads the student's current knowledge state (a per-topic
+   categorical mastery state, not a numeric score) and decides whether to
+   teach, remediate a prerequisite, or advance.
 2. The **teacher** teaches the segment — grounded in the actual course lecture via
    retrieval (RAG), not the model's generic knowledge.
 3. The **student** (simulated, for testing) responds and self-reports understanding.
-4. The **assessor** evaluates the response, checks prerequisites when the student
-   is unsure, and updates the knowledge-state vector that drives the next decision.
+4. The **assessor** makes the pedagogical call directly in one step — ADVANCE,
+   RETEACH_CURRENT, CHECK_PREREQUISITE, or REVIEW_LATER — with a one-sentence
+   evidence note, and that decision sets the topic's new mastery state.
 
 When a student is confused, the system doesn't just re-quiz — it serves a worked
 example, then traces back through prerequisite dependencies to find where the
@@ -29,8 +31,14 @@ in linear algebra), with a depth limit so a struggling student is never stuck.
 - **RAG over lecture material** — the merged lecture is chunked by section and
   embedded in a local ChromaDB vector store, so the teacher teaches using the
   instructor's own examples and phrasing.
-- **Knowledge-state tracker** — a per-topic vector modeling what the student
-  understands, plus a dependency map linking each topic to its prerequisites.
+- **Mastery graph** — each topic holds one categorical state (`NOT_SEEN`,
+  `IN_PROGRESS`, `DEMONSTRATED`, `NEEDS_REVIEW`) plus an optional misconceptions
+  list and evidence summary, not a 0-1 confidence score. A dependency map links
+  each topic to its prerequisites so a weak showing can be traced upstream.
+- **Single-step assessor decision** — the assessor makes the teach/reteach/
+  check-prerequisite/advance call directly in one LLM call (ADVANCE,
+  RETEACH_CURRENT, CHECK_PREREQUISITE, REVIEW_LATER), instead of emitting a
+  numeric score for a separate step to threshold.
 - **Model cost/quality comparison** — benchmarks LLM tiers (Gemini, GPT tiers) on
   grading accuracy vs. cost against a per-student budget.
 
@@ -40,7 +48,7 @@ in linear algebra), with a depth limit so a struggling student is never stuck.
 |---|---|
 | `orchestrator.py` | runs the diagnostic loop for a lecture segment |
 | `agents.py` | the four agents: planner, teacher, student, assessor |
-| `knowledge_state.py` | knowledge-state vector, dependency map, segment definitions |
+| `knowledge_state.py` | categorical mastery states, dependency map, segment definitions |
 | `llm.py` | multi-provider LLM interface (Gemini / OpenAI) |
 | `chunk_lecture.py` | chunks the merged lecture by section |
 | `build_vectordb.py` | embeds chunks into local ChromaDB |
@@ -79,6 +87,15 @@ python compare_rag.py distance_metrics
 ## Architecture notes
 
 The teacher and assessor are the two agents where output quality matters most:
-the teacher needs to reflect the real lecture, and the assessor's score writes
-directly into the knowledge-state vector that drives every planner decision — so
-a mis-grade there is a correctness problem, not just a stylistic one.
+the teacher needs to reflect the real lecture, and the assessor's decision writes
+directly into the mastery graph that drives every planner decision — so a
+mis-grade there is a correctness problem, not just a stylistic one.
+
+State is represented, and the advance decision is made, deliberately without a
+numeric confidence score: the assessor judges the student's answer (including
+hedged or lucky-correct responses that shouldn't count as mastery) and lands on
+one categorical decision — ADVANCE, RETEACH_CURRENT, CHECK_PREREQUISITE, or
+REVIEW_LATER — in the same call, rather than emitting a score for a separate
+step to threshold. The orchestrator applies the resulting state directly;
+RETEACH_CURRENT retries once and CHECK_PREREQUISITE walks one level of the
+dependency map, so a struggling student is never stuck on one segment.
