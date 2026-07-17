@@ -2,43 +2,77 @@
 Shared state for the tutoring agent loop.
 
 This is the spine of the system:
-  - the ASSESSOR writes to knowledge_state (updates scores after each check)
-  - the PLANNER reads from it (decides advance vs. remediate)
+  - the ASSESSOR writes to knowledge_state (sets a new categorical state after
+    each check, via a single-step ADVANCE/RETEACH/CHECK_PREREQUISITE/REVIEW
+    decision)
+  - the PLANNER reads from it (decides teach vs. remediate vs. advance)
 
-Each dimension: {"score": 0.0-1.0, "taught": bool}
-  taught=False -> not yet covered (distinct from "covered but failed" = taught=True, low score)
+Each dimension is a categorical mastery state, not a numeric score:
+    NOT_SEEN      -> not yet taught
+    IN_PROGRESS   -> taught, not yet confirmed either way
+    DEMONSTRATED  -> student showed correct, confident understanding
+    NEEDS_REVIEW  -> covered, but evidence was weak/hedged/wrong; flagged for
+                     a later pass instead of blocking progress now
 """
+
+# ---------------------------------------------------------------------------
+# Mastery states
+# ---------------------------------------------------------------------------
+NOT_SEEN = "NOT_SEEN"
+IN_PROGRESS = "IN_PROGRESS"
+DEMONSTRATED = "DEMONSTRATED"
+NEEDS_REVIEW = "NEEDS_REVIEW"
+
+MASTERY_STATES = {NOT_SEEN, IN_PROGRESS, DEMONSTRATED, NEEDS_REVIEW}
+
+
+def _topic_state(state, misconceptions=None, evidence_summary=""):
+    return {
+        "state": state,
+        "misconceptions": misconceptions or [],
+        "evidence_summary": evidence_summary,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Knowledge-state vector
 # ---------------------------------------------------------------------------
 # Prerequisite dims are set once from the pretest (here: hardcoded per persona).
-# Lecture-topic dims start taught=False and are updated live during the lecture.
+# Lecture-topic dims start NOT_SEEN and are updated live during the lecture.
 
-def fresh_knowledge_state(prereq_scores):
-    """Build a starting knowledge_state from a persona's pretest scores."""
+def fresh_knowledge_state(prereq_scores, prereq_threshold=0.7):
+    """Build a starting knowledge_state from a persona's pretest scores.
+
+    prereq_scores: {dimension: 0.0-1.0} pretest results.
+    prereq_threshold: pretest score at/above which a prerequisite starts
+        DEMONSTRATED; below it, the prerequisite starts NEEDS_REVIEW so the
+        planner can flag it for remediation before it blocks a segment.
+    """
+    def prereq_state(score):
+        return DEMONSTRATED if score >= prereq_threshold else NEEDS_REVIEW
+
     return {
         # --- prerequisites (from pretest) ---
-        "linear_algebra":     {"score": prereq_scores["linear_algebra"],  "taught": True},
-        "calculus":           {"score": prereq_scores["calculus"],        "taught": True},
-        "probability_stats":  {"score": prereq_scores["probability_stats"], "taught": True},
-        "big_o_analysis":     {"score": prereq_scores["big_o_analysis"],   "taught": True},
-        "python":             {"score": prereq_scores["python"],          "taught": True},
+        "linear_algebra":     _topic_state(prereq_state(prereq_scores["linear_algebra"])),
+        "calculus":           _topic_state(prereq_state(prereq_scores["calculus"])),
+        "probability_stats":  _topic_state(prereq_state(prereq_scores["probability_stats"])),
+        "big_o_analysis":     _topic_state(prereq_state(prereq_scores["big_o_analysis"])),
+        "python":             _topic_state(prereq_state(prereq_scores["python"])),
         # --- lecture topics (not yet taught) ---
-        "supervised_learning_setup": {"score": 0.0, "taught": False},
-        "model_as_algorithm":        {"score": 0.0, "taught": False},
-        "classification_regression": {"score": 0.0, "taught": False},
-        "knn_algorithm":             {"score": 0.0, "taught": False},
-        "distance_metrics":          {"score": 0.0, "taught": False},
-        "feature_scaling":           {"score": 0.0, "taught": False},
-        "train_test_eval":           {"score": 0.0, "taught": False},
-        "cost_sensitive_eval":       {"score": 0.0, "taught": False},
-        "choosing_k_dimensionality": {"score": 0.0, "taught": False},
+        "supervised_learning_setup": _topic_state(NOT_SEEN),
+        "model_as_algorithm":        _topic_state(NOT_SEEN),
+        "classification_regression": _topic_state(NOT_SEEN),
+        "knn_algorithm":             _topic_state(NOT_SEEN),
+        "distance_metrics":          _topic_state(NOT_SEEN),
+        "feature_scaling":           _topic_state(NOT_SEEN),
+        "train_test_eval":           _topic_state(NOT_SEEN),
+        "cost_sensitive_eval":       _topic_state(NOT_SEEN),
+        "choosing_k_dimensionality": _topic_state(NOT_SEEN),
     }
 
 
 # ---------------------------------------------------------------------------
-# Dependency map — consulted by the assessor to decide if a low score
+# Dependency map — consulted by the assessor to decide if a weak showing
 # is actually caused by an upstream gap.
 # ---------------------------------------------------------------------------
 DEPENDENCY_MAP = {
