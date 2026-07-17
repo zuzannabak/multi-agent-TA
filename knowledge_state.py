@@ -96,12 +96,14 @@ DEPENDENCY_MAP = {
 # into this structure to add them.
 #
 # Schema:
-#   dimension          : which knowledge_state key this segment updates
-#   concept            : one-line description (fed to the teacher)
-#   key_points         : bullets the teacher must cover (teacher GENERATES from these)
-#   gate_question      : the "do you understand X?" check (authored, delivered by teacher)
-#   confirmation       : {question, expected}  (authored, graded by assessor)
-#   prerequisite_diagnostics : [{dimension, question, expected}]  (authored, graded by assessor)
+#   dimension  : which knowledge_state key this segment updates
+#   concept    : one-line description (fed to the teacher)
+#   key_points : bullets the teacher must cover (teacher GENERATES from these)
+#
+# There is no authored confirmation question or prerequisite-diagnostic Q&A
+# anymore -- the proposer generates candidate questions live from whatever
+# the teacher actually taught, and the judge picks one (or skips). See
+# agents.py: propose_questions / judge_questions.
 # ---------------------------------------------------------------------------
 SEGMENTS = {
     "distance_metrics": {
@@ -113,18 +115,6 @@ SEGMENTS = {
             "For binary vectors, Hamming distance counts disagreeing positions.",
             "The same two points can be close under one metric and far under another.",
             "Choosing a metric is a modeling decision based on the data, not automatic.",
-        ],
-        "gate_question": "Do you understand why KNN needs a distance metric, and why different metrics can define 'near' differently?",
-        "confirmation": {
-            "question": "What is the Manhattan distance between the points (1, 2) and (4, 6)?",
-            "expected": "7  (|1-4| + |2-6| = 3 + 4 = 7)",
-        },
-        "prerequisite_diagnostics": [
-            {
-                "dimension": "linear_algebra",
-                "question": "What is the coordinate-wise difference between the vectors (4, 6) and (1, 2)?",
-                "expected": "(3, 4)",
-            },
         ],
     },
 
@@ -138,18 +128,6 @@ SEGMENTS = {
             "Min-max scaling maps a feature to [0,1]: x' = (x - min(x)) / (max(x) - min(x)).",
             "Standardization maps a feature to mean 0, std 1: x' = (x - mean(x)) / std(x).",
             "The goal is to give every feature an equal chance to influence distance, not let scale alone decide importance.",
-        ],
-        "gate_question": "Do you understand why unscaled features can distort KNN's distance calculations, and how feature scaling fixes it?",
-        "confirmation": {
-            "question": "A feature x1 ranges from min=2 to max=10 across the dataset. Using min-max scaling, what is the scaled value of x1=8?",
-            "expected": "0.75  ((8-2)/(10-2) = 6/8 = 0.75)",
-        },
-        "prerequisite_diagnostics": [
-            {
-                "dimension": "distance_metrics",
-                "question": "Why would a feature measured in GHz (values near 10^9) dominate a Euclidean distance calculation compared to a feature measured in millimeters (values near 10^-3)?",
-                "expected": "Euclidean distance sums squared differences across features; a feature with a much larger numeric scale produces much larger differences, so it dominates the total distance regardless of the other feature's actual importance.",
-            },
         ],
     },
 

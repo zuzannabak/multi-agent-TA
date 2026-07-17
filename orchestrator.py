@@ -1,23 +1,28 @@
 """
-Orchestrator: runs ONE segment end-to-end, implementing the interactive
-branching diagnostic:
+Orchestrator: runs ONE segment end-to-end.
 
-    planner -> if "remediate", address the named weak prerequisite first
-               (teach it fully if it's its own lecture segment, otherwise
-               a single diagnostic check), THEN continue below
-    teach -> gate question (cheap self-report filter)
-        strong_yes -> confirmation question -> assessor DECIDES:
-            ADVANCE            -> DEMONSTRATED, move on
-            RETEACH_CURRENT    -> worked example, re-check ONCE
-            CHECK_PREREQUISITE -> prerequisite-diagnostic branch, then
-                                   NEEDS_REVIEW, move on
-            REVIEW_LATER       -> NEEDS_REVIEW, move on
-        unsure -> worked example -> re-ask gate, then same confirmation +
-                  decision step above
+    planner -> if "remediate", log the weak prerequisite + a one-sentence
+               bridge (never taught or re-diagnosed in-flow), THEN continue
+    teach mini-unit
+        -> proposer generates 0-3 concrete candidate questions
+        -> if none: keep teaching (one more pass), concept stays IN_PROGRESS
+        -> else judge decides ASK or SKIP
+            -> SKIP: keep teaching (one more pass), concept stays IN_PROGRESS
+            -> ASK: ask the chosen question -> assessor DECIDES:
+                ADVANCE            -> DEMONSTRATED, move on
+                RETEACH_CURRENT    -> ONE worked example, re-check once
+                CHECK_PREREQUISITE -> log the gap + one-sentence bridge,
+                                       NEEDS_REVIEW, continue
+                REVIEW_LATER       -> NEEDS_REVIEW, continue
 
-The orchestrator owns turn-taking so the loop always terminates: RETEACH_CURRENT
-only ever triggers one retry, and CHECK_PREREQUISITE checks one level of the
-dependency map, so a struggling student is never stuck on one segment.
+Design principle: the DEFAULT is to SKIP asking and keep teaching -- asking
+requires the judge's justification. A concept only becomes DEMONSTRATED via
+a correct answer to a concrete question, never via self-report.
+
+The orchestrator owns turn-taking so the loop always terminates: teaching
+rounds are capped (MAX_TEACH_ROUNDS), RETEACH_CURRENT only ever triggers one
+retry, and a prerequisite gap gets one bridge sentence and a log entry --
+never nested in-flow teaching -- so a struggling student is never stuck.
 
 Run:
     pip install openai
@@ -28,7 +33,12 @@ from knowledge_state import (
     fresh_knowledge_state, DEPENDENCY_MAP, SEGMENTS,
     NOT_SEEN, IN_PROGRESS, DEMONSTRATED, NEEDS_REVIEW,
 )
-from agents import planner, teacher, student, assessor
+from agents import planner, teacher, propose_questions, judge_questions, student, assessor
+
+# Initial teach + at most one "keep teaching" continuation pass if nothing
+# assessable has come up yet -- bounds the propose/judge loop so it always
+# terminates.
+MAX_TEACH_ROUNDS = 2
 
 
 def set_state(ks, dimension, target_state, evidence_summary="", misconception=""):
@@ -45,7 +55,9 @@ def log(role, msg):
     print(f"\n[{role}]\n{msg}")
 
 
-def run_segment(segment, knowledge_state, persona):
+def run_segment(segment, knowledge_state, persona, gap_log=None):
+    if gap_log is None:
+        gap_log = []
     dim = segment["dimension"]
     prereqs = DEPENDENCY_MAP.get(dim, [])
 
@@ -56,51 +68,59 @@ def run_segment(segment, knowledge_state, persona):
     # --- Planner steers: act on "remediate" instead of just logging it ---
     target = plan.get("target_dimension")
     if plan["action"] == "remediate" and target in knowledge_state and target != dim:
-        knowledge_state = _remediate(target, segment, knowledge_state, persona)
+        knowledge_state = _remediate(target, segment, knowledge_state, gap_log)
     elif plan["action"] == "remediate":
         log("ORCHESTRATOR",
             f"Planner said remediate, but target '{target}' isn't a usable "
             f"prerequisite (same as segment or unrecognized); teaching {dim} directly.")
 
-    # --- Teacher teaches ---
+    # --- Teacher teaches, then propose/judge whether there's something worth asking ---
     teaching = teacher(segment, "teach")["teaching_text"]
     log("TEACHER", teaching)
     knowledge_state = set_state(knowledge_state, dim, IN_PROGRESS)
-
-    # --- Gate question: cheap self-report filter (unchanged mechanism) ---
-    gate_q = segment["gate_question"]
-    log("TEACHER (gate)", gate_q)
     mastery = persona["mastery"].get(dim, 0.0)
-    s = student(gate_q, teaching, persona, mastery)
-    log("STUDENT", f"({s['self_reported_understanding']}) {s['answer']}")
 
-    gate = assessor("evaluate_gate", gate_question=gate_q, student_answer=s)
-    log("ASSESSOR", f"gate branch = {gate['branch']}")
+    for round_num in range(1, MAX_TEACH_ROUNDS + 1):
+        proposal = propose_questions(segment, teaching)
+        candidates = proposal.get("candidates", [])
 
-    if gate["branch"] == "unsure":
-        example = teacher(segment, "worked_example")["example_text"]
-        log("TEACHER (worked example)", example)
-        teaching = teaching + "\n\n" + example
+        judgment = None
+        if not candidates:
+            log("PROPOSER", "No candidates -- nothing complete/assessable taught yet.")
+        else:
+            log("PROPOSER", "\n".join(
+                f"- {c['question']} (reveals if wrong: {c['reveals_if_wrong']})"
+                for c in candidates))
+            judgment = judge_questions(candidates, segment)
+            log("JUDGE", f"{judgment['action']} -- {judgment['reason']}")
 
-        s = student(gate_q, teaching, persona, mastery)
-        log("STUDENT", f"({s['self_reported_understanding']}) {s['answer']}")
-        gate = assessor("evaluate_gate", gate_question=gate_q, student_answer=s)
-        log("ASSESSOR", f"gate branch after example = {gate['branch']}")
+        if judgment and judgment["action"] == "ASK":
+            return _ask_and_decide(segment, teaching, judgment["chosen"], persona, mastery,
+                                    knowledge_state, dim, prereqs, gap_log, retried=False)
 
-    # --- Real check: confirmation question, graded by ONE assessor decision ---
-    return _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
-                               dim, prereqs, retried=False)
+        # No candidates, or judge said SKIP -- default behavior: keep teaching.
+        if round_num < MAX_TEACH_ROUNDS:
+            log("ORCHESTRATOR", f"Skipping the question this round; continuing to teach {dim}.")
+            more = teacher(segment, "worked_example")["example_text"]
+            log("TEACHER (continued)", more)
+            teaching = teaching + "\n\n" + more
+        else:
+            log("ORCHESTRATOR",
+                f"No question worth asking after {MAX_TEACH_ROUNDS} teaching rounds; "
+                f"{dim} stays IN_PROGRESS.")
+            return knowledge_state
+
+    return knowledge_state  # unreachable -- loop always returns above
 
 
-def _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
-                        dim, prereqs, retried):
-    conf = segment["confirmation"]
-    log("ASSESSOR (confirmation)", conf["question"])
-    sa = student(conf["question"], teaching, persona, mastery)
+def _ask_and_decide(segment, teaching, chosen, persona, mastery, knowledge_state,
+                     dim, prereqs, gap_log, retried):
+    log("TEACHER (asking)", chosen["question"])
+    sa = student(chosen["question"], teaching, persona, mastery)
     log("STUDENT", sa["answer"])
 
     decision = assessor("decide", dimension=dim, prerequisite_dims=prereqs,
-                         question=conf["question"], expected=conf["expected"],
+                         question=chosen["question"], expected=chosen["expected"],
                          student_answer=sa)
     log("ASSESSOR",
         f"decision={decision['decision']} target_state={decision['target_state']}\n"
@@ -114,88 +134,50 @@ def _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
         return knowledge_state
 
     if decision["decision"] == "RETEACH_CURRENT" and not retried:
-        log("ORCHESTRATOR", f"RETEACH_CURRENT: worked example on {dim}, re-checking once.")
+        log("ORCHESTRATOR",
+            f"RETEACH_CURRENT: one worked example on {dim}, re-checking once "
+            f"(single-intervention limit).")
         example = teacher(segment, "worked_example")["example_text"]
         log("TEACHER (worked example)", example)
         teaching = teaching + "\n\n" + example
         knowledge_state = set_state(knowledge_state, dim, IN_PROGRESS,
                                      decision["evidence"], decision.get("misconception", ""))
-        return _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
-                                   dim, prereqs, retried=True)
+        return _ask_and_decide(segment, teaching, chosen, persona, mastery, knowledge_state,
+                                dim, prereqs, gap_log, retried=True)
 
     if decision["decision"] == "CHECK_PREREQUISITE":
-        knowledge_state = _check_prerequisites(segment, knowledge_state, persona)
+        prereq_dim = prereqs[0] if prereqs else dim
+        note = decision.get("misconception") or decision["evidence"]
+        gap_log.append({"topic": prereq_dim, "note": note})
+        log("ORCHESTRATOR", f"Prerequisite gap flagged: '{prereq_dim}' -- {note}")
+        log("TEACHER (bridge)",
+            f"(Quick note: this traces back to {prereq_dim} -- keep that in mind.)")
         knowledge_state = set_state(knowledge_state, dim, NEEDS_REVIEW,
                                      decision["evidence"], decision.get("misconception", ""))
-        log("ORCHESTRATOR", f"Prerequisite(s) checked; {dim} -> NEEDS_REVIEW, advancing.")
+        log("ORCHESTRATOR", f"{dim} -> NEEDS_REVIEW, continuing (no nested prerequisite teaching).")
         return knowledge_state
 
-    # REVIEW_LATER, or a RETEACH_CURRENT that already used its one retry --
-    # depth limit reached, mark and move on so the student is never stuck.
+    # REVIEW_LATER, or a RETEACH_CURRENT that already used its one intervention --
+    # single-intervention limit reached; mark and continue so the student is
+    # never stuck.
     knowledge_state = set_state(knowledge_state, dim, NEEDS_REVIEW,
                                  decision["evidence"], decision.get("misconception", ""))
-    log("ORCHESTRATOR", f"Depth limit reached; {dim} -> NEEDS_REVIEW, advancing.")
+    log("ORCHESTRATOR", f"Single-intervention limit reached; {dim} -> NEEDS_REVIEW, continuing.")
     return knowledge_state
 
 
-def _check_prerequisites(segment, knowledge_state, persona):
-    """CHECK_PREREQUISITE branch: run this segment's authored prerequisite
-    diagnostics (one level deep, per the depth limit) via the dependency map
-    and record what each one shows."""
-    for diag in segment.get("prerequisite_diagnostics", []):
-        pdim = diag["dimension"]
-        pmastery = persona["mastery"].get(pdim, 0.0)
-        pa = student(diag["question"], "", persona, pmastery)
-        log(f"STUDENT (prereq: {pdim})", pa["answer"])
-
-        pdecision = assessor("decide", dimension=pdim, prerequisite_dims=[],
-                              question=diag["question"], expected=diag["expected"],
-                              student_answer=pa)
-        log("ASSESSOR",
-            f"prereq {pdim}: decision={pdecision['decision']} "
-            f"target_state={pdecision['target_state']} ({pdecision['evidence']})")
-        knowledge_state = set_state(knowledge_state, pdim, pdecision["target_state"],
-                                     pdecision["evidence"], pdecision.get("misconception", ""))
-        if pdecision["target_state"] == NEEDS_REVIEW:
-            log("ASSESSOR", f"GAP FOUND upstream in '{pdim}'. Remediation pointer: "
-                            f"review {pdim} before revisiting {segment['dimension']}.")
-    return knowledge_state
-
-
-def _remediate(target_dim, segment, knowledge_state, persona):
+def _remediate(target_dim, segment, knowledge_state, gap_log):
     """The planner flagged `target_dim` as a weak prerequisite for `segment`.
-    Address it before teaching the segment itself, instead of just logging
-    the planner's advice and teaching through it anyway."""
-    log("ORCHESTRATOR",
-        f"Planner steering: remediating '{target_dim}' before teaching {segment['dimension']}.")
-
-    if target_dim in SEGMENTS:
-        # It's itself a lecture topic we have full teaching material for --
-        # run the normal teach/gate/confirm loop on it first.
-        return run_segment(SEGMENTS[target_dim], knowledge_state, persona)
-
-    # No lecture segment for this dimension (e.g. a pretest-only prerequisite
-    # like linear_algebra) -- fall back to this segment's own diagnostic
-    # question for it, if one exists.
-    diag = next((d for d in segment.get("prerequisite_diagnostics", [])
-                 if d["dimension"] == target_dim), None)
-    if diag is None:
-        log("ORCHESTRATOR",
-            f"No lecture segment or diagnostic available for '{target_dim}'; "
-            f"proceeding to teach {segment['dimension']} without remediation.")
-        return knowledge_state
-
-    mastery = persona["mastery"].get(target_dim, 0.0)
-    pa = student(diag["question"], "", persona, mastery)
-    log(f"STUDENT (remediation: {target_dim})", pa["answer"])
-    decision = assessor("decide", dimension=target_dim, prerequisite_dims=[],
-                         question=diag["question"], expected=diag["expected"],
-                         student_answer=pa)
-    log("ASSESSOR",
-        f"remediation {target_dim}: decision={decision['decision']} "
-        f"target_state={decision['target_state']} ({decision['evidence']})")
-    return set_state(knowledge_state, target_dim, decision["target_state"],
-                      decision["evidence"], decision.get("misconception", ""))
+    Per the single-intervention design, prerequisites are never taught or
+    re-diagnosed in-flow (no nested teaching) -- just logged to the running
+    gap list with a one-sentence bridge, then the segment's own teaching
+    proceeds."""
+    note = f"Flagged weak/not-seen before teaching {segment['dimension']}."
+    gap_log.append({"topic": target_dim, "note": note})
+    log("ORCHESTRATOR", f"Prerequisite gap logged: '{target_dim}' -- {note}")
+    log("TEACHER (bridge)",
+        f"(Quick note: {segment['dimension']} builds on {target_dim} -- keep that in mind.)")
+    return knowledge_state
 
 
 if __name__ == "__main__":
@@ -222,13 +204,15 @@ if __name__ == "__main__":
 
     ks = fresh_knowledge_state(prereq_scores, prereq_threshold=0.7)
     segment = SEGMENTS["feature_scaling"]
+    gap_log = []
 
     print("=" * 70)
     print("RUNNING ONE SEGMENT:", segment["dimension"])
     print("=" * 70)
 
-    ks = run_segment(segment, ks, persona)
+    ks = run_segment(segment, ks, persona, gap_log)
 
     print("\n" + "=" * 70)
     print("FINAL STATE for this dimension:", ks[segment["dimension"]])
+    print("PREREQUISITE GAP LOG:", gap_log)
     print("=" * 70)

@@ -5,14 +5,52 @@ model, and returns structured output. The orchestrator wires them together.
 Contract summary:
   planner  : reads knowledge_state           -> decides teach / remediate / advance
   teacher  : given a segment + task          -> generates teaching text or worked example
+  proposer : given the mini-unit just taught -> 0-3 concrete candidate questions
+             (an empty list is a first-class, valid outcome)
+  judge    : given the candidates            -> ASK (pick the single best one) or SKIP,
+             no numeric score -- one direct call, same as the assessor
   student  : given content + question + mastery -> answers + self-reports understanding
-  assessor : evaluates gate self-report, and makes the ADVANCE / RETEACH /
-             CHECK_PREREQUISITE / REVIEW_LATER call directly on a checked
-             answer -> (orchestrator applies target_state to knowledge_state)
+  assessor : makes the ADVANCE / RETEACH_CURRENT / CHECK_PREREQUISITE /
+             REVIEW_LATER call directly on a checked answer -> (orchestrator
+             applies target_state to knowledge_state)
+
+A concept only becomes DEMONSTRATED via a correct answer to a concrete
+question the judge chose to ask -- never via self-report. The default is to
+SKIP asking and keep teaching; asking requires the judge's justification.
 """
 import json
+import re
+
 from llm import call_json
 from retrieval import retrieve_for_segment, format_context
+
+
+# ---------------------------------------------------------------------------
+# Self-report ban-list
+# ---------------------------------------------------------------------------
+# "Do you understand?" style questions are worthless -- students say yes
+# almost regardless of whether they actually understand. Any generated
+# question matching one of these phrasings is rejected before it can be
+# asked; the question proposer and judge both run this as a hard filter.
+SELF_REPORT_PATTERNS = [
+    r"do you understand",
+    r"does (?:that|this) make sense",
+    r"are you comfortable",
+    r"are you familiar",
+    r"do you feel",
+    r"do you follow",
+    r"is (?:that|this) clear",
+    r"are you confident",
+    r"do you get it",
+]
+_SELF_REPORT_RE = re.compile("|".join(SELF_REPORT_PATTERNS), re.IGNORECASE)
+
+
+def is_self_report_question(question_text):
+    """True if `question_text` asks the student to self-report understanding
+    instead of demonstrating it via a concrete answer. Self-report questions
+    are banned outright -- see SELF_REPORT_PATTERNS above."""
+    return bool(_SELF_REPORT_RE.search(question_text))
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +143,107 @@ def teacher(segment, task, use_rag=True):
 
 
 # ---------------------------------------------------------------------------
+# QUESTION PROPOSER
+# ---------------------------------------------------------------------------
+def propose_questions(segment, teaching_text):
+    """Given the mini-unit just taught, propose 1-3 CONCRETE candidate
+    questions -- or none, if nothing complete and assessable has been taught
+    yet. An empty list is a first-class, valid outcome: returning nothing is
+    better than asking a premature or weak question.
+
+    Returns {'candidates': [{'question', 'expected', 'reveals_if_wrong'}, ...]}
+    """
+    system = (
+        "You are the Question Proposer agent in a tutoring system. You just "
+        "watched the Teacher teach a mini-unit. Propose 1-3 CONCRETE candidate "
+        "questions that make the student DEMONSTRATE understanding through "
+        "action: compute, choose, compare, classify, predict, explain, or "
+        "find an error. NEVER propose a question that just asks the student "
+        "to self-report understanding (e.g. 'do you understand', 'does that "
+        "make sense') -- those are worthless and banned outright.\n\n"
+        "Every candidate must be answerable using ONLY what the teaching text "
+        "below actually covered -- do not require content that hasn't been "
+        "taught yet. If the mini-unit only set up an idea and hasn't yet "
+        "reached a complete, assessable concept, return an EMPTY candidates "
+        "list. Returning nothing is better than asking a premature or weak "
+        "question.\n\n"
+        "Return ONLY JSON with key \"candidates\": a list (0 to 3 items) of "
+        "objects, each with keys "
+        '"question" (the concrete question), '
+        '"expected" (the correct answer), '
+        '"reveals_if_wrong" (one sentence: what a wrong answer would reveal '
+        "about the student's misconception)."
+    )
+    user = (
+        f"Concept: {segment['concept']}\n"
+        f"Key points for this segment:\n- " + "\n- ".join(segment["key_points"]) +
+        f"\n\nWhat the teacher just taught:\n{teaching_text}"
+    )
+    return call_json(system, user, max_tokens=500)
+
+
+# ---------------------------------------------------------------------------
+# QUESTION JUDGE
+# ---------------------------------------------------------------------------
+def judge_questions(candidates, segment):
+    """Given the proposer's candidates, make ONE direct call: ASK (and pick
+    the single best candidate) or SKIP (keep teaching, ask nothing). No
+    numeric score or confidence threshold -- same style as the assessor's
+    single-step decision. Also runs the self-report ban-list as a hard filter.
+
+    Returns {'action': 'ASK'|'SKIP', 'reason': str, 'chosen': candidate|None}
+    """
+    clean = [c for c in candidates if not is_self_report_question(c["question"])]
+    if not clean:
+        return {
+            "action": "SKIP",
+            "reason": "No candidates (or none survived the self-report ban-list).",
+            "chosen": None,
+        }
+
+    system = (
+        "You are the Question Judge agent. You receive candidate questions "
+        "proposed right after a mini-unit was taught. Decide ONE thing "
+        "directly: ASK or SKIP. Do not produce a numeric score or confidence "
+        "value -- make the call.\n\n"
+        "Choose SKIP if none of the candidates are good enough: a candidate "
+        "is NOT good enough if it only tests recall rather than real "
+        "understanding, requires content that hasn't been taught yet, is "
+        "confounded by a prerequisite gap instead of cleanly testing this "
+        "concept, is ambiguous, or wouldn't change what the tutor does next "
+        "regardless of the answer.\n\n"
+        "Choose ASK if at least one candidate is good -- and pick the single "
+        "best one.\n\n"
+        "Return ONLY JSON with keys: "
+        '"action" (one of "ASK", "SKIP"), '
+        '"reason" (one sentence), '
+        '"chosen_index" (0-based index into the candidate list if ASK, or '
+        "null if SKIP)."
+    )
+    user = (
+        f"Concept: {segment['concept']}\n\n"
+        "Candidate questions:\n" +
+        "\n".join(f"{i}. {c['question']} (expected: {c['expected']})"
+                   for i, c in enumerate(clean))
+    )
+    result = call_json(system, user, max_tokens=300)
+
+    if result.get("action") != "ASK" or result.get("chosen_index") is None:
+        return {"action": "SKIP", "reason": result.get("reason", ""), "chosen": None}
+
+    idx = result["chosen_index"]
+    chosen = clean[idx] if isinstance(idx, int) and 0 <= idx < len(clean) else None
+    if chosen is None or is_self_report_question(chosen["question"]):
+        return {
+            "action": "SKIP",
+            "reason": "Judge's chosen question failed the ban-list check.",
+            "chosen": None,
+        }
+
+    return {"action": "ASK", "reason": result.get("reason", ""), "chosen": chosen}
+
+
+# ---------------------------------------------------------------------------
 # STUDENT  (simulated learner, driven by its persona's mastery)
 # ---------------------------------------------------------------------------
 def student(question, context, persona, topic_mastery):
@@ -158,27 +297,12 @@ def student(question, context, persona, topic_mastery):
 # ASSESSOR
 # ---------------------------------------------------------------------------
 def assessor(task, **kw):
-    """task = 'evaluate_gate' -> {'branch': 'strong_yes'|'unsure'}
-       task = 'decide'        -> {'decision': 'ADVANCE'|'RETEACH_CURRENT'|
-                                               'CHECK_PREREQUISITE'|'REVIEW_LATER',
-                                   'evidence': str,
-                                   'misconception': str,
-                                   'target_state': 'DEMONSTRATED'|'NEEDS_REVIEW'|'IN_PROGRESS'}
+    """task = 'decide' -> {'decision': 'ADVANCE'|'RETEACH_CURRENT'|
+                                        'CHECK_PREREQUISITE'|'REVIEW_LATER',
+                            'evidence': str,
+                            'misconception': str,
+                            'target_state': 'DEMONSTRATED'|'NEEDS_REVIEW'|'IN_PROGRESS'}
     """
-    if task == "evaluate_gate":
-        system = (
-            "You are the Assessor agent. A student answered a 'do you understand?' "
-            "gate question. Decide the branch. Return ONLY JSON with key \"branch\": "
-            "\"strong_yes\" only if they clearly and confidently understand; "
-            "\"unsure\" otherwise (any hesitation, 'not sure', or shaky answer)."
-        )
-        user = (
-            f"Gate question: {kw['gate_question']}\n"
-            f"Student self-report: {kw['student_answer'].get('self_reported_understanding')}\n"
-            f"Student answer: {kw['student_answer'].get('answer')}"
-        )
-        return call_json(system, user, max_tokens=200)
-
     if task == "decide":
         system = (
             "You are the Assessor agent. You make the pedagogical call about "
