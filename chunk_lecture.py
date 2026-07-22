@@ -15,7 +15,7 @@ Run:
 import json
 import re
 
-SOURCE_FILE = "merged_knn_lecture_notes.md"
+SOURCE_FILE = "merged_knn_lecture_clean.md"
 OUTPUT_FILE = "chunks.json"
 SECTION_TOKEN_LIMIT = 800
 
@@ -34,27 +34,39 @@ KNOWLEDGE_DIMENSIONS = [
 # Maps each ## section number (in document order) to the knowledge dimension
 # it primarily teaches. Hand-mapped by reading the section content once --
 # update this if sections are added/reordered/split in the source document.
+#
+# Remapped 2026-07-22 for merged_knn_lecture_clean.md, which strips non-lecture
+# content out of the merged_knn_lecture_new_07222026.md revision: the document
+# header/source-hierarchy note, old section 1 ("why the instructor writes by
+# hand" -- pedagogy, no ML content), the "### Source status" asides inside
+# what were sections 8/9/10, old section 23 ("end of lecture" -- logistics),
+# and the trailing "Consolidated lecture flow" summary (a one-line-per-topic
+# recap that matched almost any retrieval query without teaching anything).
+# Removing old section 1 shifted every remaining section down by one and
+# renumbered 2-22 -> 1-21; the dimension assignments themselves are otherwise
+# unchanged from the prior mapping.
 SECTION_DIMENSION_MAP = {
-    1: "supervised_learning_setup",   # Transition into Supervised Learning
-    2: "model_as_algorithm",          # Three Core Questions (what is f?)
-    3: "classification_regression",   # Mental Pictures: classification/regression
-    4: "knn_algorithm",               # Discovering nearest-neighbor reasoning
-    5: "knn_algorithm",               # Formal setup of KNN
-    6: "knn_algorithm",               # KNN pseudocode and computational cost
-    7: "distance_metrics",            # Hyperparameters: k and distance
-    8: "distance_metrics",            # Distance functions (Euclidean, L-p, Hamming...)
-    9: "feature_scaling",             # Feature scaling and preprocessing
-    10: "train_test_eval",            # Train/test split
-    11: "train_test_eval",            # Confusion table
-    12: "train_test_eval",            # Accuracy, precision, recall, F1
-    13: "cost_sensitive_eval",        # Cost of mistakes
-    14: "train_test_eval",            # Multiclass classification (evaluation extension)
-    15: "choosing_k_dimensionality",  # Live demo: effect of k on decision regions
-    16: "train_test_eval",            # Live demo: train/test split + accuracy on Iris
-    17: "knn_algorithm",              # Live demo: KNN vs. other classifiers
-    18: "knn_algorithm",              # Is KNN a good algorithm? (dense-neighborhood need)
-    19: "choosing_k_dimensionality",  # Curse of dimensionality
-    20: "knn_algorithm",              # Consolidated takeaways
+    1: "supervised_learning_setup",    # The dataset: examples, features, labels
+    2: "supervised_learning_setup",    # Where the dataset comes from: sampling the world
+    3: "supervised_learning_setup",    # The supervised-learning loop and prediction model f
+    4: "model_as_algorithm",           # Three organizing questions (what/how good/how learn is f)
+    5: "classification_regression",    # Classification vs. regression: mental picture
+    6: "knn_algorithm",                # Discovering nearest-neighbor reasoning
+    7: "knn_algorithm",                # Formal KNN setup and prediction rule
+    8: "knn_algorithm",                # Euclidean distance, pseudocode, computational cost
+    9: "choosing_k_dimensionality",    # Hyperparameters and the problem of choosing k
+    10: "distance_metrics",            # Distance measures (L-p, Manhattan, cosine, Hamming)
+    11: "feature_scaling",             # Feature scaling and normalization
+    12: "train_test_eval",             # Evaluating KNN: split the data first
+    13: "train_test_eval",             # Confusion matrix
+    14: "train_test_eval",             # Accuracy, error rate, precision, recall, F1
+    15: "cost_sensitive_eval",         # Unequal costs of mistakes
+    16: "train_test_eval",             # Extending evaluation to multiclass classification
+    17: "choosing_k_dimensionality",   # Iris demo: KNN decision regions across k
+    18: "choosing_k_dimensionality",   # Selecting k through repeated train-test experiments
+    19: "knn_algorithm",               # Demonstration of other classifier families
+    20: "knn_algorithm",               # Is KNN a good algorithm? (dense-neighborhood need)
+    21: "choosing_k_dimensionality",   # Curse of dimensionality
 }
 
 SECTION_HEADER_RE = re.compile(r"^## (\d+)\.\s*(.+)$", re.MULTILINE)
