@@ -42,14 +42,39 @@ def set_state(ks, dimension, target_state, evidence_summary="", misconception=""
     return ks
 
 
+def apply_dimension_updates(ks, dimension_updates, misconception=""):
+    """Apply every entry in the assessor's dimension_updates list to the
+    knowledge state independently -- one answer can move several dimensions
+    at once, each to its own new_state, based only on the evidence the
+    assessor found for that specific dimension."""
+    for update in dimension_updates:
+        ks = set_state(ks, update["dimension"], update["new_state"],
+                        update["evidence"], misconception)
+    return ks
+
+
+def log_dimension_updates(decision, all_dimensions):
+    updated = {u["dimension"] for u in decision["dimension_updates"]}
+    print(f"\n[ASSESSOR] decision={decision['decision']}")
+    for update in decision["dimension_updates"]:
+        print(f"  {update['dimension']} -> {update['new_state']} ({update['evidence']})")
+    for dim in all_dimensions:
+        if dim not in updated:
+            print(f"  ({dim}: no evidence in this answer)")
+    if decision.get("misconception"):
+        print(f"  misconception: {decision['misconception']}")
+
+
 def log(role, msg):
     print(f"\n[{role}]\n{msg}")
 
 
 def run_segment(segment, knowledge_state, persona):
-    # A segment names conceptual/technical/foundational dimensions together;
-    # single-dimension state tracking below keys off the conceptual (Group C)
-    # one until the assessor is reworked to update all of them independently.
+    # A segment names conceptual/technical/foundational dimensions together.
+    # `dim` (the Group C / conceptual one) is still used for planner
+    # prerequisites, gate mastery, and logging labels, but the assessor now
+    # grades against the segment's FULL dimensions list and updates each one
+    # independently based on the evidence actually present in the answer.
     dim = primary_conceptual_dimension(segment["dimensions"])
     prereqs = DEPENDENCY_MAP.get(dim, [])
 
@@ -103,18 +128,15 @@ def _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
     sa = student(conf["question"], teaching, persona, mastery)
     log("STUDENT", sa["answer"])
 
-    decision = assessor("decide", dimension=dim, prerequisite_dims=prereqs,
+    decision = assessor("decide", dimensions=segment["dimensions"], prerequisite_dims=prereqs,
                          question=conf["question"], expected=conf["expected"],
                          student_answer=sa)
-    log("ASSESSOR",
-        f"decision={decision['decision']} target_state={decision['target_state']}\n"
-        f"  evidence: {decision['evidence']}" +
-        (f"\n  misconception: {decision['misconception']}" if decision.get("misconception") else ""))
+    log_dimension_updates(decision, segment["dimensions"])
+    knowledge_state = apply_dimension_updates(knowledge_state, decision["dimension_updates"],
+                                               decision.get("misconception", ""))
 
     if decision["decision"] == "ADVANCE":
-        knowledge_state = set_state(knowledge_state, dim, DEMONSTRATED,
-                                     decision["evidence"], decision.get("misconception", ""))
-        log("ORCHESTRATOR", f"{dim} -> DEMONSTRATED, advancing.")
+        log("ORCHESTRATOR", "Advancing.")
         return knowledge_state
 
     if decision["decision"] == "RETEACH_CURRENT" and not retried:
@@ -122,23 +144,18 @@ def _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
         example = teacher(segment, "worked_example")["example_text"]
         log("TEACHER (worked example)", example)
         teaching = teaching + "\n\n" + example
-        knowledge_state = set_state(knowledge_state, dim, IN_PROGRESS,
-                                     decision["evidence"], decision.get("misconception", ""))
         return _check_and_advance(segment, teaching, persona, mastery, knowledge_state,
                                    dim, prereqs, retried=True)
 
     if decision["decision"] == "CHECK_PREREQUISITE":
         knowledge_state = _check_prerequisites(segment, knowledge_state, persona)
-        knowledge_state = set_state(knowledge_state, dim, NEEDS_REVIEW,
-                                     decision["evidence"], decision.get("misconception", ""))
-        log("ORCHESTRATOR", f"Prerequisite(s) checked; {dim} -> NEEDS_REVIEW, advancing.")
+        log("ORCHESTRATOR", "Prerequisite(s) checked; advancing.")
         return knowledge_state
 
     # REVIEW_LATER, or a RETEACH_CURRENT that already used its one retry --
-    # depth limit reached, mark and move on so the student is never stuck.
-    knowledge_state = set_state(knowledge_state, dim, NEEDS_REVIEW,
-                                 decision["evidence"], decision.get("misconception", ""))
-    log("ORCHESTRATOR", f"Depth limit reached; {dim} -> NEEDS_REVIEW, advancing.")
+    # depth limit reached, move on (per dimension_updates already applied
+    # above) so the student is never stuck.
+    log("ORCHESTRATOR", "Depth limit reached; advancing.")
     return knowledge_state
 
 
@@ -152,15 +169,14 @@ def _check_prerequisites(segment, knowledge_state, persona):
         pa = student(diag["question"], "", persona, pmastery)
         log(f"STUDENT (prereq: {pdim})", pa["answer"])
 
-        pdecision = assessor("decide", dimension=pdim, prerequisite_dims=[],
+        pdecision = assessor("decide", dimensions=[pdim], prerequisite_dims=[],
                               question=diag["question"], expected=diag["expected"],
                               student_answer=pa)
-        log("ASSESSOR",
-            f"prereq {pdim}: decision={pdecision['decision']} "
-            f"target_state={pdecision['target_state']} ({pdecision['evidence']})")
-        knowledge_state = set_state(knowledge_state, pdim, pdecision["target_state"],
-                                     pdecision["evidence"], pdecision.get("misconception", ""))
-        if pdecision["target_state"] == NEEDS_REVIEW:
+        log_dimension_updates(pdecision, [pdim])
+        knowledge_state = apply_dimension_updates(knowledge_state, pdecision["dimension_updates"],
+                                                    pdecision.get("misconception", ""))
+        updated_states = {u["dimension"]: u["new_state"] for u in pdecision["dimension_updates"]}
+        if updated_states.get(pdim) == NEEDS_REVIEW:
             log("ASSESSOR", f"GAP FOUND upstream in '{pdim}'. Remediation pointer: "
                             f"review {pdim} before revisiting {primary_conceptual_dimension(segment['dimensions'])}.")
     return knowledge_state
@@ -194,14 +210,12 @@ def _remediate(target_dim, segment, knowledge_state, persona):
     mastery = persona["mastery"].get(target_dim, 0.0)
     pa = student(diag["question"], "", persona, mastery)
     log(f"STUDENT (remediation: {target_dim})", pa["answer"])
-    decision = assessor("decide", dimension=target_dim, prerequisite_dims=[],
+    decision = assessor("decide", dimensions=[target_dim], prerequisite_dims=[],
                          question=diag["question"], expected=diag["expected"],
                          student_answer=pa)
-    log("ASSESSOR",
-        f"remediation {target_dim}: decision={decision['decision']} "
-        f"target_state={decision['target_state']} ({decision['evidence']})")
-    return set_state(knowledge_state, target_dim, decision["target_state"],
-                      decision["evidence"], decision.get("misconception", ""))
+    log_dimension_updates(decision, [target_dim])
+    return apply_dimension_updates(knowledge_state, decision["dimension_updates"],
+                                    decision.get("misconception", ""))
 
 
 if __name__ == "__main__":
@@ -238,5 +252,7 @@ if __name__ == "__main__":
     ks = run_segment(segment, ks, persona)
 
     print("\n" + "=" * 70)
-    print("FINAL STATE for this dimension:", ks[dim])
+    print("FINAL STATE for this segment's dimensions:")
+    for d in segment["dimensions"]:
+        print(f"  {d}: {ks[d]}")
     print("=" * 70)

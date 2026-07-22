@@ -8,7 +8,8 @@ Contract summary:
   student  : given content + question + mastery -> answers + self-reports understanding
   assessor : evaluates gate self-report, and makes the ADVANCE / RETEACH /
              CHECK_PREREQUISITE / REVIEW_LATER call directly on a checked
-             answer -> (orchestrator applies target_state to knowledge_state)
+             answer, attributing evidence per dimension -> (orchestrator
+             applies each entry in dimension_updates to knowledge_state)
 """
 import json
 from llm import call_json
@@ -161,9 +162,13 @@ def assessor(task, **kw):
     """task = 'evaluate_gate' -> {'branch': 'strong_yes'|'unsure'}
        task = 'decide'        -> {'decision': 'ADVANCE'|'RETEACH_CURRENT'|
                                                'CHECK_PREREQUISITE'|'REVIEW_LATER',
-                                   'evidence': str,
-                                   'misconception': str,
-                                   'target_state': 'DEMONSTRATED'|'NEEDS_REVIEW'|'IN_PROGRESS'}
+                                   'dimension_updates': [
+                                       {'dimension': str,
+                                        'new_state': 'DEMONSTRATED'|'IN_PROGRESS'|'NEEDS_REVIEW',
+                                        'evidence': str},
+                                       ...
+                                   ],  # only dimensions this answer has evidence for
+                                   'misconception': str}
     """
     if task == "evaluate_gate":
         system = (
@@ -182,9 +187,9 @@ def assessor(task, **kw):
     if task == "decide":
         system = (
             "You are the Assessor agent. You make the pedagogical call about "
-            "this topic directly, in a single step -- there is no numeric score "
-            "for a separate process to threshold afterward. Grade the student's "
-            "answer against the expected answer, then decide.\n\n"
+            "this checkpoint directly, in a single step -- there is no numeric "
+            "score for a separate process to threshold afterward. Grade the "
+            "student's answer against the expected answer, then decide.\n\n"
             "First silently judge the student's confidence from their wording: "
             "\"confident\" (states the answer directly, no hedging), \"hedged\" "
             "(reaches a correct answer but hedges along the way, e.g. 'I think "
@@ -193,34 +198,56 @@ def assessor(task, **kw):
             "guessing). A correct-but-hedged or correct-but-guessing answer is "
             "NOT evidence of mastery -- never choose ADVANCE for an answer that "
             "only sounds lucky.\n\n"
-            "Then choose exactly one decision:\n"
+            "Then choose exactly one overall decision for this checkpoint:\n"
             "  ADVANCE            - correct AND confidently reasoned; the "
-            "student has demonstrated mastery of this topic.\n"
+            "student has demonstrated mastery of what this question was "
+            "checking.\n"
             "  RETEACH_CURRENT    - wrong, hedged, or guessed, but the error "
-            "looks like a misunderstanding of THIS topic specifically (not an "
-            "upstream gap) -- a worked example on this topic should fix it.\n"
+            "looks like a misunderstanding of THIS checkpoint specifically "
+            "(not an upstream gap) -- a worked example should fix it.\n"
             "  CHECK_PREREQUISITE - the error pattern suggests the student is "
-            "missing one of this topic's listed prerequisites, not the topic "
+            "missing one of the listed prerequisites, not the checkpoint "
             "itself.\n"
             "  REVIEW_LATER       - weak or wrong, but doesn't cleanly point "
-            "at this topic or a specific prerequisite; flag it without "
+            "at this checkpoint or a specific prerequisite; flag it without "
             "blocking progress.\n\n"
-            "Return ONLY JSON with keys: "
+            "SEPARATELY, the checkpoint's segment lists several knowledge "
+            "dimensions -- some conceptual (why something works), some "
+            "technical (computing/applying a formula), some foundational. A "
+            "single answer is rarely evidence for all of them at once. For "
+            "EACH dimension listed below, ask: does THIS SPECIFIC answer "
+            "actually contain evidence about THAT dimension? For example, a "
+            "question asking the student to compute a min-max scaled value "
+            "is evidence about scaling_computation and formula_application -- "
+            "it is NOT evidence about knn_intuition. A student explaining WHY "
+            "a large-scale feature dominates is evidence about knn_intuition, "
+            "not about scaling_computation. If a dimension has no evidence in "
+            "this answer, DO NOT include it in dimension_updates and do not "
+            "guess or default a state for it -- leave it out entirely, even "
+            "if it is the segment's primary dimension. A student can "
+            "understand a concept and fail the computation, or vice versa; "
+            "your job is to keep those separate, not to collapse them into "
+            "one verdict.\n\n"
+            "Return ONLY JSON with keys:\n"
             '"decision" (one of "ADVANCE", "RETEACH_CURRENT", '
-            '"CHECK_PREREQUISITE", "REVIEW_LATER"), '
-            '"evidence" (one sentence: what in the answer supports this decision), '
-            '"misconception" (short description of the observed misconception, or "" if none), '
-            '"target_state" (the new state for this topic: "DEMONSTRATED" if '
-            'ADVANCE, "NEEDS_REVIEW" if REVIEW_LATER or CHECK_PREREQUISITE, '
-            '"IN_PROGRESS" if RETEACH_CURRENT).'
+            '"CHECK_PREREQUISITE", "REVIEW_LATER"),\n'
+            '"dimension_updates": a list of objects, one per dimension (from '
+            'the provided list) that this answer actually provides evidence '
+            'about -- omit any dimension with no evidence -- each object '
+            'shaped {"dimension": <name>, "new_state": "DEMONSTRATED"|'
+            '"IN_PROGRESS"|"NEEDS_REVIEW", "evidence": "<one sentence: what '
+            'in the answer supports this>"},\n'
+            '"misconception" (short description of the observed misconception, or "" if none).'
         )
         user = (
-            f"Topic: {kw['dimension']}\n"
-            f"Prerequisites for this topic: {kw.get('prerequisite_dims') or 'none'}\n"
+            f"Dimensions this segment can supply evidence for (only include "
+            f"in dimension_updates the ones THIS answer has direct evidence "
+            f"for): {kw['dimensions']}\n"
+            f"Prerequisites relevant to this checkpoint: {kw.get('prerequisite_dims') or 'none'}\n"
             f"Question: {kw['question']}\n"
             f"Expected answer: {kw['expected']}\n"
             f"Student answer: {kw['student_answer'].get('answer')}"
         )
-        return call_json(system, user, max_tokens=300)
+        return call_json(system, user, max_tokens=500)
 
     raise ValueError(f"Unknown assessor task: {task}")

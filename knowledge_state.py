@@ -163,12 +163,14 @@ DEPENDENCY_MAP = {
 #
 # Schema:
 #   dimensions         : list of knowledge_state keys this segment can supply
-#                         evidence for. Usually one conceptual (Group C) dim,
-#                         one technical (Group D) dim, and sometimes one
-#                         foundational (Group A) dim. Retrieval and the
-#                         orchestrator's single-dimension state tracking use
-#                         primary_conceptual_dimension(dimensions) -- the
-#                         Group C entry.
+#                         evidence for -- STUDENT KNOWLEDGE, not lecture
+#                         content. Usually one conceptual (Group C) dim, one
+#                         technical (Group D) dim, and sometimes one
+#                         foundational (Group A) dim.
+#   lecture_topic      : the chunk_lecture.py / vector-store tag (old 9-topic
+#                         scheme) this segment's LECTURE CONTENT should
+#                         retrieve from. A separate taxonomy from `dimensions`
+#                         on purpose -- retrieval.py filters on this field.
 #   concept            : one-line description (fed to the teacher)
 #   key_points         : bullets the teacher must cover (teacher GENERATES from these)
 #   gate_question      : the "do you understand X?" check (authored, delivered by teacher)
@@ -178,6 +180,7 @@ DEPENDENCY_MAP = {
 SEGMENTS = {
     "distance_metrics": {
         "dimensions": ["knn_intuition", "distance_computation", "linear_algebra"],
+        "lecture_topic": "distance_metrics",
         "concept": "Why KNN needs a distance metric, and why different metrics define 'near' differently.",
         "key_points": [
             "KNN's whole prediction depends on which points count as 'nearest'.",
@@ -202,6 +205,7 @@ SEGMENTS = {
 
     "feature_scaling": {
         "dimensions": ["knn_intuition", "scaling_computation", "formula_application"],
+        "lecture_topic": "feature_scaling",
         "concept": "Why unscaled features distort KNN's distance calculations, and how min-max scaling or standardization fixes it.",
         "key_points": [
             "Distance-based methods like KNN are sensitive to each feature's numeric scale.",

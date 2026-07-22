@@ -2,13 +2,14 @@
 Retrieval layer for the teacher agent: queries the local ChromaDB
 "knn_lecture" collection (built by build_vectordb.py) for the lecture
 chunks most relevant to a given segment, restricted to that segment's
-knowledge dimension so the teacher only pulls from the right part of
-the lecture.
+lecture_topic (chunk_lecture.py's old 9-topic scheme) so the teacher only
+pulls from the right part of the lecture.
+
+lecture_topic is a separate taxonomy from a segment's `dimensions`: chunk
+tags describe LECTURE CONTENT, dimensions describe STUDENT KNOWLEDGE.
 """
 import chromadb
 from chromadb.utils import embedding_functions
-
-from knowledge_state import primary_conceptual_dimension
 
 PERSIST_DIR = "./chroma_db"
 COLLECTION_NAME = "knn_lecture"
@@ -27,18 +28,16 @@ def _get_collection():
 
 def retrieve_for_segment(segment, n_results=3):
     """Query the knn_lecture collection using the segment's concept text,
-    filtered to chunks tagged with this segment's primary conceptual
-    dimension (the Group C entry in its `dimensions` list).
+    filtered to chunks tagged with this segment's `lecture_topic`.
 
     Returns a list of dicts: {"chunk_id", "section_title", "chunk_text"},
-    ordered most relevant first. Empty list if the dimension has no chunks.
+    ordered most relevant first. Empty list if the topic has no chunks.
     """
     collection = _get_collection()
-    dim = primary_conceptual_dimension(segment["dimensions"])
     results = collection.query(
         query_texts=[segment["concept"]],
         n_results=n_results,
-        where={"segment_dimension": dim},
+        where={"segment_dimension": segment["lecture_topic"]},
     )
 
     ids = results["ids"][0]
