@@ -36,7 +36,7 @@ def planner(knowledge_state, segment, prerequisite_dims=None):
         "DEMONSTRATED."
     )
     user = (
-        f"Segment dimension: {segment['dimension']}\n"
+        f"Segment dimensions: {segment['dimensions']}\n"
         f"Concept: {segment['concept']}\n"
         f"Prerequisites for this segment: {prerequisite_dims or 'none'}\n\n"
         f"Current knowledge_state:\n{json.dumps(knowledge_state, indent=2)}"

@@ -11,7 +11,7 @@ Run:
 import sys
 import textwrap
 
-from knowledge_state import SEGMENTS
+from knowledge_state import SEGMENTS, primary_conceptual_dimension
 from agents import teacher
 from retrieval import retrieve_for_segment
 
@@ -60,7 +60,7 @@ def main():
         return
     segment = SEGMENTS[dim]
 
-    print_header(f"RAG COMPARISON: {segment['dimension']}")
+    print_header(f"RAG COMPARISON: {primary_conceptual_dimension(segment['dimensions'])}")
     print(f"Concept: {segment['concept']}")
     print()
 

@@ -8,6 +8,8 @@ the lecture.
 import chromadb
 from chromadb.utils import embedding_functions
 
+from knowledge_state import primary_conceptual_dimension
+
 PERSIST_DIR = "./chroma_db"
 COLLECTION_NAME = "knn_lecture"
 
@@ -25,16 +27,18 @@ def _get_collection():
 
 def retrieve_for_segment(segment, n_results=3):
     """Query the knn_lecture collection using the segment's concept text,
-    filtered to chunks tagged with this segment's dimension.
+    filtered to chunks tagged with this segment's primary conceptual
+    dimension (the Group C entry in its `dimensions` list).
 
     Returns a list of dicts: {"chunk_id", "section_title", "chunk_text"},
     ordered most relevant first. Empty list if the dimension has no chunks.
     """
     collection = _get_collection()
+    dim = primary_conceptual_dimension(segment["dimensions"])
     results = collection.query(
         query_texts=[segment["concept"]],
         n_results=n_results,
-        where={"segment_dimension": segment["dimension"]},
+        where={"segment_dimension": dim},
     )
 
     ids = results["ids"][0]

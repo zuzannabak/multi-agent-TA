@@ -27,6 +27,7 @@ Run:
 from knowledge_state import (
     fresh_knowledge_state, DEPENDENCY_MAP, SEGMENTS,
     NOT_SEEN, IN_PROGRESS, DEMONSTRATED, NEEDS_REVIEW,
+    primary_conceptual_dimension,
 )
 from agents import planner, teacher, student, assessor
 
@@ -46,7 +47,10 @@ def log(role, msg):
 
 
 def run_segment(segment, knowledge_state, persona):
-    dim = segment["dimension"]
+    # A segment names conceptual/technical/foundational dimensions together;
+    # single-dimension state tracking below keys off the conceptual (Group C)
+    # one until the assessor is reworked to update all of them independently.
+    dim = primary_conceptual_dimension(segment["dimensions"])
     prereqs = DEPENDENCY_MAP.get(dim, [])
 
     # --- Planner decides ---
@@ -158,7 +162,7 @@ def _check_prerequisites(segment, knowledge_state, persona):
                                      pdecision["evidence"], pdecision.get("misconception", ""))
         if pdecision["target_state"] == NEEDS_REVIEW:
             log("ASSESSOR", f"GAP FOUND upstream in '{pdim}'. Remediation pointer: "
-                            f"review {pdim} before revisiting {segment['dimension']}.")
+                            f"review {pdim} before revisiting {primary_conceptual_dimension(segment['dimensions'])}.")
     return knowledge_state
 
 
@@ -167,7 +171,8 @@ def _remediate(target_dim, segment, knowledge_state, persona):
     Address it before teaching the segment itself, instead of just logging
     the planner's advice and teaching through it anyway."""
     log("ORCHESTRATOR",
-        f"Planner steering: remediating '{target_dim}' before teaching {segment['dimension']}.")
+        f"Planner steering: remediating '{target_dim}' before teaching "
+        f"{primary_conceptual_dimension(segment['dimensions'])}.")
 
     if target_dim in SEGMENTS:
         # It's itself a lecture topic we have full teaching material for --
@@ -182,7 +187,8 @@ def _remediate(target_dim, segment, knowledge_state, persona):
     if diag is None:
         log("ORCHESTRATOR",
             f"No lecture segment or diagnostic available for '{target_dim}'; "
-            f"proceeding to teach {segment['dimension']} without remediation.")
+            f"proceeding to teach {primary_conceptual_dimension(segment['dimensions'])} "
+            f"without remediation.")
         return knowledge_state
 
     mastery = persona["mastery"].get(target_dim, 0.0)
@@ -208,27 +214,29 @@ if __name__ == "__main__":
     # answers. knowledge_state is the TUTOR's belief, seeded from the pretest
     # via fresh_knowledge_state() and updated only through assessor decisions.
     prereq_scores = {
-        "linear_algebra": 0.35, "calculus": 0.7, "probability_stats": 0.5,
-        "big_o_analysis": 0.6, "python": 0.8,
+        "linear_algebra": 0.35, "formula_application": 0.6, "probability_stats": 0.5,
+        "computational_thinking": 0.6, "python_reading": 0.8,
     }
     persona = {
         "name": "Student B - strong math, new to ML",
         "mastery": {
             **prereq_scores,
-            "distance_metrics": 0.8,
-            "feature_scaling": 0.3,   # weak -- should trigger reteach/prereq-check path
+            "distance_computation": 0.8,
+            "scaling_computation": 0.3,
+            "knn_intuition": 0.3,   # weak -- should trigger reteach/prereq-check path
         },
     }
 
     ks = fresh_knowledge_state(prereq_scores, prereq_threshold=0.7)
     segment = SEGMENTS["feature_scaling"]
+    dim = primary_conceptual_dimension(segment["dimensions"])
 
     print("=" * 70)
-    print("RUNNING ONE SEGMENT:", segment["dimension"])
+    print("RUNNING ONE SEGMENT:", dim)
     print("=" * 70)
 
     ks = run_segment(segment, ks, persona)
 
     print("\n" + "=" * 70)
-    print("FINAL STATE for this dimension:", ks[segment["dimension"]])
+    print("FINAL STATE for this dimension:", ks[dim])
     print("=" * 70)
